@@ -14,14 +14,19 @@
  * under the License.
  */
 
-#include <sys/time.h>
-#include <sys/types.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
 #include <string.h>
 #include <assert.h>
 #include <event.h>
+#include <fcntl.h>
+
+#include <sys/time.h>
+#include <sys/resource.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+
 #include "log.h"
 #include "main.h"
 #include "utils.h"
@@ -54,6 +59,50 @@ static void terminate(int sig, short what, void *_arg)
 {
 	if (event_loopbreak() != 0)
 		log_error(LOG_WARNING, "event_loopbreak");
+}
+
+static int nr_file_adjust(void)
+{
+	int ret, fd, max = 1024 * 1024, prev;
+	char path[] = "/proc/sys/fs/nr_open";
+	char buf[64];
+	struct rlimit rlim;
+
+	/* Avoid oom-killer */
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		fprintf(stderr, "Can't open %s, %m\n", path);
+		goto set_rlimit;
+	}
+	ret = read(fd, buf, sizeof(buf));
+	if (ret < 0) {
+		fprintf(stderr, "Can't read %s, %m\n", path);
+		close(fd);
+		return errno;
+	}
+	close(fd);
+	max = atoi(buf);
+
+set_rlimit:
+	ret = getrlimit(RLIMIT_NOFILE, &rlim);
+	if (ret < 0)
+		prev = 0;
+	else
+		prev = rlim.rlim_cur;
+
+	rlim.rlim_cur = rlim.rlim_max = max;
+
+	ret = setrlimit(RLIMIT_NOFILE, &rlim);
+	if (ret < 0) {
+		fprintf(stderr, "Can't adjust nr_open %d %m\n", max);
+	} else {
+		if (prev == 0)
+			printf("Adjusted nr_open to %d\n", max);
+		else
+			printf("Adjusted nr_open from %d to %d\n", prev, max);
+	}
+
+	return 0;
 }
 
 int main(int argc, char **argv)
@@ -104,6 +153,8 @@ int main(int argc, char **argv)
 		puts("libevent event_get_struct_event_size() != sizeof(struct event)! Check `redsocks -v` and recompile redsocks");
 		return EXIT_FAILURE;
 	}
+
+	nr_file_adjust();
 
 	FILE *f = fopen(confname, "r");
 	if (!f) {
